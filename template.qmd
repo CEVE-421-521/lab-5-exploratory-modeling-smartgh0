@@ -1,29 +1,32 @@
 ---
 title: "Lab 5: Sea-Level Rise"
-author: "<Your Name (NetID)>"
+author:  "Solomon Nyamekye : SN66"
 jupyter: julia-1.10
-date: 2024-02-16
+date: 2024-02-28
 
 format: 
     html: default
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
+    #pdf:
+        #documentclass: article
+        #fontsize: 11pt
+        #geometry:
+        #    - margin=1in  
+        #number-sections: true
+        #code-line-numbers: true
+    docx: 
+        toc: true
+        fig-format: png
         number-sections: true
         code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 bibliography: references.bib
+
+#execute: 
+  #cache: true
 ---
 
 # Setup
@@ -60,3 +63,274 @@ Plots.default(; margin=5Plots.mm)
 using Revise
 using HouseElevation
 ```
+
+
+# 1. Building House Object
+
+```{julia}
+
+house = let
+    haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame) # read in the file
+   haz_fl_dept, :DmgFnId == 56
+    row = @rsubset(haz_fl_dept, :DmgFnId == 56)[1, :] # select the row I want
+    area = 2406u"ft^2" 
+    height_above_gauge = 2u"ft"
+    House(
+        row;
+        area=area,
+        height_above_gauge=height_above_gauge,
+        value_usd=506_600,
+    )
+end;
+```
+## a. House details
+- Zillow was used for the identification of a single-family residence with 4 bedrooms and 4 bathrooms situated approximately 0.56 miles from Galveston Pier 21, TX. The distance from the gauge was estimated using Google Maps, while the elevation of the house above Mean Sea Level (MSL) was determined using the USGS National Map Viewer. The estimated value of the house and area of the house were from Zillow. 
+- Depth-damage function from depth-damage functions from the HAZUS model developed by the [US Army Corps of Engineers](https://zenodo.org/records/10027236).
+
+## b.  Depth-damage curve for House
+
+```{julia}
+let
+    depths = uconvert.(u"ft", (-7.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+    damages = house.ddf.(depths) ./ 100
+    damages_1000_usd = damages .* house.value_usd ./ 1000
+    scatter(
+        depths,
+        damages_1000_usd;
+        xlabel="Flood Depth",
+        ylabel="Damage (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+    )
+end
+```
+## c. Plot of cost for raising the house from 0 to 14 ft
+
+```{julia}
+let
+    elevations = 0u"ft":0.25u"ft":14u"ft"
+    costs = [elevation_cost(house, eᵢ) for eᵢ in elevations]
+    scatter(
+        elevations,
+        costs ./ 1_000;
+        xlabel="Elevation",
+        ylabel="Cost (Thousand USD)",
+        label="$(house.description)\n($(house.source))",
+        legend=:bottomright,
+        size=(800, 400),
+        yformatter=:plain, # prevents scientific notation
+        aspect_ration=:equal,
+        xlim = (minimum(elevations), maximum(elevations)),
+        ylim = (minimum(costs ./1_000), maximum(costs ./1_000)),
+
+    )
+end
+```
+# 2. Sea-level Rise
+```{julia}
+slr_scenarios = let
+    df = CSV.read("data/slr_oddo.csv", DataFrame)
+    [Oddo17SLR(a, b, c, tstar, cstar) for (a, b, c, tstar, cstar) in eachrow(df)]
+end;
+```
+# 3. Sampling storm surge and discount rates
+
+## storm surge
+```{julia}
+function draw_surge_distribution()
+    μ = rand(Normal(5, 1))
+    σ = rand(Exponential(1.5))
+    ξ = rand(Normal(0.1, 0.05))
+    GeneralizedExtremeValue(μ, σ, ξ) #using GEV distribution for uncertainty surrounding storm surge. 
+end
+```
+## b. Discount rates
+```{julia}
+function draw_discount_rate()
+#| output: false
+
+ # PDF iscounts rates between 0% to 5% base on historical data while considering the discount rate as random variable and 
+    rate = rand(Normal(0.05, 0.02)) 
+    return max(0.0,rate) #avoiding negative discount rates
+
+   end
+```
+# Setting up model
+
+## a. Setting up Model parameter object, p
+
+```{julia}
+#| output: false
+p = ModelParams(
+    house=house,
+    years=2024:2100 #using 100 years period
+)
+```
+## b. Setting up object to hold State of the world, SOW
+```{julia}
+#| output: false
+sow = SOW(
+    rand(slr_scenarios),
+    draw_surge_distribution(),
+    draw_discount_rate()
+)
+```
+## c. Defining my action, a
+
+```{julia}
+#| output: false
+a = Action(5.0u"ft")
+```
+## d. Runing the simulation
+```{julia}
+res = run_sim(a, sow, p)
+
+```
+# Large esemble
+
+## Runing simulations for 10 sow and selected action of elevating the house (0.0ft, 2.0ft, 4.0ft, 6.0ft, 8.0ft)
+```{julia}
+samples = 100
+
+sows = [SOW(rand(slr_scenarios), draw_surge_distribution(), draw_discount_rate()) for _ in 1:samples] # for 10 SOWs
+
+#Define initial heights for action
+initial_heights = [0,2,4,6,8] #elevation to at least cover FEMA's BFE 
+
+#creating dataframe for each action
+dfs =[]
+df=[]
+npv_results_df =[]
+
+for height in initial_heights
+actions = [Action(height*u"ft") for _ in 1:samples] #looping around each height
+results = [run_sim(a, s, p) for (a, s) in zip(actions, sows)]
+# adding also sea-level rise to dataframe
+year = 2024:(2024-1+samples) # getting number of years sea-level rise data
+slr_ft_values = [sow.slr(y) for y in year] #adding Sea-level rise to DataFrame
+
+# creating datafram for results of actions
+df = DataFrame(
+    npv=results,
+    slr=slr_ft_values,
+    Δh_ft=[a.Δh_ft for a in actions],
+    slr_a=[s.slr.a for s in sows],
+    slr_b=[s.slr.b for s in sows],
+    slr_c=[s.slr.c for s in sows],
+    slr_tstar=[s.slr.tstar for s in sows],
+    slr_cstar=[s.slr.cstar for s in sows],
+    surge_μ=[s.surge_dist.μ for s in sows],
+    surge_σ=[s.surge_dist.σ for s in sows],
+    surge_ξ=[s.surge_dist.ξ for s in sows],
+    discount_rate=[s.discount_rate for s in sows],
+)
+push!(dfs, df)
+end
+## combining the results from each sow for each action, a into a single dataframe for analysis
+println("Results for $samples simulations")
+sim_df = vcat(dfs...) #semicolumn to prevent output from showing 
+```
+# Analysis
+Finding sow and actions that yields best/worst npv results
+
+## Find the sow and action that gives best npv value
+```{julia}
+using Statistics
+ #fing maximum npv value in all the overall results.
+overall_best_npv_row = argmax(sim_df.npv)
+#extracting the row that gives best npv results
+best_npv_result_para = sim_df[overall_best_npv_row, :]
+println(best_npv_result_para) 
+```
+The table above contains combinations of parameters that gives best npv value
+
+## Finding the sow and action that gives worst npv result
+```{julia}
+#finding minimum npv results 
+overall_worst_npv_row = argmin(sim_df.npv)
+#extracting the row that gives best npv results
+worst_npv_result_para = sim_df[overall_worst_npv_row , :]
+println(worst_npv_result_para) 
+```
+The table above contains combinations of parameters that gives worst npv value
+
+## What is the most important parameters
+
+
+```{julia}
+#print(Int(global_df.Δh_ft))
+scatter(sim_df.discount_rate, 
+        sim_df.npv; 
+        zcolor=Int.(sim_df.Δh_ft),
+        xlabel="Discount Rates",
+        ylabel="NPV",
+        markersize=Int.(sim_df.Δh_ft),
+        size=(800, 400),
+        legend=:bottomright,
+        yformatter=:plain,
+
+        )
+
+```
+```{julia}
+ scatter(sim_df.slr, 
+        sim_df.npv; 
+        zcolor=Int.(sim_df.Δh_ft),
+        xlabel="sea-level rise",
+        ylabel="NPV",
+        markersize=Int.(sim_df.Δh_ft),
+        size=(800, 400),
+        legend=:bottomright,
+        yformatter=:plain,
+
+        )
+
+
+
+```
+```{julia}
+scatter(sim_df.surge_μ, 
+        sim_df.npv; 
+        zcolor=Int.(sim_df.Δh_ft),
+        xlabel="surge_μ",
+        ylabel="NPV",
+        markersize=Int.(sim_df.Δh_ft),
+        size=(800, 400),
+        legend=:bottomright,
+        yformatter=:plain,
+
+        )
+```
+```{julia}
+scatter(sim_df.surge_σ, 
+        sim_df.npv; 
+        zcolor=Int.(sim_df.Δh_ft),
+        xlabel="surge_σ",
+        ylabel="NPV",
+        markersize=Int.(sim_df.Δh_ft),
+        size=(800, 400),
+        legend=:bottomright,
+        yformatter=:plain,
+)
+```
+
+```{julia}
+
+scatter(sim_df.surge_σ, 
+        sim_df.npv; 
+        zcolor=Int.(sim_df.Δh_ft),
+        markersize=Int.(sim_df.Δh_ft),
+        size=(800, 400),
+        xlabel="surge_σ",
+        ylabel="NPV",
+        yformatter=:plain,
+)
+
+```
+- The results DataFrame and the plots for discount rate, surge_σ, surge_μ, and sea-level shows the elevation height has more impact on the npv, followed by the discount rate, the sea-level rise , and then storm surge.
+
+- Also running more simulations increases the resolution and makes it easy to see patterns in the data. I tried 10 and 100 simulations and found out that the 100 gave better picture of the output then the 10 simulations. 
+
+- The implies the elevation height impact the npv more than other parameters. However decision makers should also consider the other factors like, discount rate, sea-level rise, and storm surge.

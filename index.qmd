@@ -11,18 +11,18 @@ format:
 
     # YOU DO NOT NEED BOTH PDF AND DOCX.
     # COMMENT OR DELETE THE ONE YOU DON'T WANT TO USE.
-    pdf:
-        documentclass: article
-        fontsize: 11pt
-        geometry:
-            - margin=1in  
+    #pdf:
+        #documentclass: article
+        #fontsize: 11pt
+        #geometry:
+            #- margin=1in  
+        #number-sections: true
+        #code-line-numbers: true
+    docx: 
+        toc: true
+        fig-format: png
         number-sections: true
         code-line-numbers: true
-    #docx: 
-    #    toc: true
-    #    fig-format: png
-    #    number-sections: true
-    #    code-line-numbers: true
 
 date-format: "ddd., MMM. D"
 bibliography: references.bib
